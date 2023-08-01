@@ -240,4 +240,8 @@ contract Presale is IPresale, TokenTransferer, OwnableUpgradeable, ReentrancyGua
         currencies = queryCurrencies();
         claimTimes = _claimTimes;
     }
+
+    function emergencyWithdraw(address token, address to, uint256 amount) public onlyOwner {
+        transferTokenTo(token, to, amount);
+    }
 }

@@ -4,7 +4,6 @@ pragma solidity ^0.8.4;
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../common/TokenTransferer.sol";
 import "../common/ERC721Transferer.sol";
 import "./IFixedPool.sol";
@@ -55,11 +54,6 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
 
     function updateDepositVault(address val) public onlyOwner {
         _depositVault = val;
-        uint256 balance = IERC20(_depositToken).balanceOf(address(this));
-        if (balance > 0) {
-            IERC20(_depositToken).transfer(_depositVault, balance);
-            IDepositVault(_depositVault).deposit(_depositToken, address(this));
-        }
     }
 
     function updateRewardVault(address val) public onlyOwner {
