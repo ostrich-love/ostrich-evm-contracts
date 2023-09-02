@@ -56,4 +56,6 @@ contract NFTAirdrop is INFTAirdrop, OwnableUpgradeable, ReentrancyGuardUpgradeab
     function keccak256Hash(address user) public view returns (bytes32) {
         return keccak256(abi.encodePacked(address(this), user));
     }
+
+    
 }

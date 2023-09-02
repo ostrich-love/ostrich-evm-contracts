@@ -5,17 +5,16 @@ import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "../common/TokenTransferer.sol";
 import "../common/ERC721Transferer.sol";
-import "./IFlexiblePool.sol";
+import "./IFlexiblePoolV2.sol";
 import "./IRewardUnlocker.sol";
 import "../vault/IDepositVault.sol";
-import "../vault/IRewardVault.sol";
 
-contract FlexiblePool is
+contract FlexiblePoolV2 is
     OwnableUpgradeable,
     TokenTransferer,
     ReentrancyGuardUpgradeable,
     ERC721Transferer,
-    IFlexiblePool
+    IFlexiblePoolV2
 {
     uint256 constant INDEX_PRECISION = 1e12;
 
@@ -25,9 +24,7 @@ contract FlexiblePool is
 
     uint256 private _startTime;
     uint256 private _endTime;
-    uint256 private _weeklyReward;
     uint256 private _rewardIndex;
-    uint256 private _lastDistributeTime;
     uint256 private _totalDeposits;
     uint256 private _totalWeight;
     uint256 private _pointExchangeRate;
@@ -38,14 +35,13 @@ contract FlexiblePool is
     uint256 private _accelerateRate;
     mapping(address => uint256) private _userAccelerateNFTs;
     address private _depositVault;
-    address private _rewardVault;
+    uint256 private _cumulativeDistributes;
 
     function initialize(
         address depositToken,
         address rewardToken,
         address rewardUnlocker,
-        address depositVault,
-        address rewardVault
+        address depositVault
     ) public initializer {
         __Ownable_init();
         __ReentrancyGuard_init();
@@ -53,11 +49,6 @@ contract FlexiblePool is
         _rewardToken = rewardToken;
         _rewardUnlocker = rewardUnlocker;
         _depositVault = depositVault;
-        _rewardVault = rewardVault;
-    }
-
-    function updateRewardVault(address val) public onlyOwner {
-        _rewardVault = val;
     }
 
     function updateDepositVault(address val) public onlyOwner {
@@ -118,10 +109,6 @@ contract FlexiblePool is
         _endTime = val;
     }
 
-    function updateWeeklyReward(uint256 val) public onlyOwner {
-        _weeklyReward = val;
-    }
-
     function updatePointExchangeRate(uint256 val) public onlyOwner {
         _pointExchangeRate = val;
     }
@@ -139,24 +126,19 @@ contract FlexiblePool is
         returns (
             uint256 startTime,
             uint256 endTime,
-            uint256 weeklyReward,
             uint256 rewardIndex,
-            uint256 lastDistributeTime,
             uint256 totalDeposits,
             uint256 totalWeight,
             uint256 pointExchangeRate,
             address depositToken,
             address rewardToken,
             address rewardUnlocker,
-            address depositVault,
-            address rewardVault
+            address depositVault
         )
     {
         startTime = _startTime;
         endTime = _endTime;
-        weeklyReward = _weeklyReward;
         rewardIndex = _rewardIndex;
-        lastDistributeTime = _lastDistributeTime;
         totalDeposits = _totalDeposits;
         pointExchangeRate = _pointExchangeRate;
         depositToken = _depositToken;
@@ -164,7 +146,6 @@ contract FlexiblePool is
         rewardUnlocker = _rewardUnlocker;
         totalWeight = _totalWeight;
         depositVault = _depositVault;
-        rewardVault = _rewardVault;
     }
 
     function deposit(uint256 amount) public payable override nonReentrant {
@@ -252,13 +233,14 @@ contract FlexiblePool is
         deposition.reward = totalReward - harvestAmount;
         deposition.lastHarvestTime = block.timestamp;
         _depositions[user] = deposition;
-        IRewardVault(_rewardVault).transferTo(_rewardToken, user, harvestAmount);
+        IDepositVault(_depositVault).withdraw(_rewardToken, user, harvestAmount);
         emit HarvestEvent(user, harvestAmount, block.timestamp);
     }
 
     function queryPendingReward(address user) public view returns (uint256 pending) {
         if (_depositions[user].amount > 0) {
-            uint256 rewardIndex = _rewardIndex + queryPendingRewardIndex();
+            (, uint256 pendingRewardIndex) = queryPendingRewardIndex();
+            uint256 rewardIndex = _rewardIndex + pendingRewardIndex;
             uint256 weight = _depositions[user].weight + _depositions[user].extraWeight;
             pending = (weight * (rewardIndex - _depositions[user].rewardIndex)) / INDEX_PRECISION;
         }
@@ -276,25 +258,26 @@ contract FlexiblePool is
         return IRewardUnlocker(_rewardUnlocker).queryPoints(user);
     }
 
-    function queryPendingDistributeReward() public view returns (uint256 reward) {
-        uint256 timestamp = block.timestamp;
-        if (timestamp > _lastDistributeTime && _lastDistributeTime > 0 && _totalWeight > 0) {
-            reward = ((timestamp - _lastDistributeTime) * (_weeklyReward)) / 3600 / 24 / 7;
-        }
-    }
-
-    function queryPendingRewardIndex() private view returns (uint256 rewardindex) {
+    function queryPendingRewardIndex()
+        public
+        view
+        returns (uint256 vaultCumulativeDeposits, uint256 pendingRewardIndex)
+    {
         if (_totalWeight > 0) {
-            uint256 reward = queryPendingDistributeReward();
+            vaultCumulativeDeposits = IDepositVault(_depositVault).cumulativeDepositsOf(_rewardToken, address(this));
+            uint256 reward = vaultCumulativeDeposits - _cumulativeDistributes;
             if (reward > 0) {
-                rewardindex = (reward * INDEX_PRECISION) / (_totalWeight);
+                pendingRewardIndex = (reward * INDEX_PRECISION) / _totalWeight;
             }
         }
     }
 
     function distribute() public {
-        _rewardIndex += queryPendingRewardIndex();
-        _lastDistributeTime = block.timestamp;
+        (uint256 vaultCumulativeDeposits, uint256 pendingRewardIndex) = queryPendingRewardIndex();
+        if (vaultCumulativeDeposits > 0 && pendingRewardIndex > 0) {
+            _rewardIndex += pendingRewardIndex;
+            _cumulativeDistributes = vaultCumulativeDeposits;
+        }
     }
 
     function emergencyWithdraw(address token, address to, uint256 amount) public onlyOwner {

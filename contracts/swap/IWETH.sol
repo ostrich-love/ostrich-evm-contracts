@@ -3,6 +3,8 @@
 pragma solidity ^0.8.4;
 
 interface IWETH {
+    function balanceOf(address account) external view returns (uint256);
+
     function deposit() external payable;
 
     function transfer(address to, uint256 value) external returns (bool);

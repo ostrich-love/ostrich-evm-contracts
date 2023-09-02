@@ -46,4 +46,8 @@ contract SwapFactory is Ownable, ISwapFactory {
     function setOnlyWhiteContract(address pair, bool enabled) external onlyOwner {
         ISwapPair(pair).setOnlyWhiteContract(enabled);
     }
+
+    function allPairsLength() external view override returns (uint) {
+        return allPairs.length;
+    }
 }

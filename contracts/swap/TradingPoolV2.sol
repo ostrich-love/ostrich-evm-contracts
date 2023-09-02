@@ -9,10 +9,16 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../common/TokenTransferer.sol";
 import "../farm/IRewardUnlocker.sol";
 import "./ISwapObserver.sol";
-import "./ITradingPool.sol";
-import "../vault/IRewardVault.sol";
+import "./ITradingPoolV2.sol";
+import "../vault/IDepositVault.sol";
 
-contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTransferer, ReentrancyGuardUpgradeable {
+contract TradingPoolV2 is
+    OwnableUpgradeable,
+    ISwapObserver,
+    ITradingPoolV2,
+    TokenTransferer,
+    ReentrancyGuardUpgradeable
+{
     using EnumerableSet for EnumerableSet.AddressSet;
     uint256 constant INDEX_PRECISION = 1e12;
     address[] private _callers;
@@ -23,28 +29,29 @@ contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTr
     mapping(address => PoolInfo) private _poolInfos;
     mapping(address => mapping(address => UserPoolInfo)) private _userPoolInfos;
 
-    address private _rewardVault;
+    address private _depositVault;
+    uint256 private _cumulativeDistributes;
 
     function initialize(
         address rewardToken,
+        address depositVault,
         address rewardUnlocker,
-        uint256 pointExchangeRate,
-        address rewardVault
+        uint256 pointExchangeRate
     ) public initializer {
         __Ownable_init();
         __ReentrancyGuard_init();
         _rewardToken = rewardToken;
-        _rewardVault = rewardVault;
+        _depositVault = depositVault;
         _rewardUnlocker = rewardUnlocker;
         _pointExchangeRate = pointExchangeRate;
     }
 
-    function updateRewardVault(address val) public onlyOwner {
-        _rewardVault = val;
+    function updateDepositVault(address val) public onlyOwner {
+        _depositVault = val;
     }
 
-    function queryRewardVault() public view returns (address) {
-        return _rewardVault;
+    function queryDepositVault() public view returns (address) {
+        return _depositVault;
     }
 
     function queryCallers() public view returns (address[] memory) {
@@ -136,17 +143,12 @@ contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTr
         emit SwapEvent(pool, trader, tokenIn, tokenOut, amountIn, amountOut, points, timestamp);
     }
 
-    function _queryPendingDistributeReward(address pool) private view returns (uint256 reward) {
-        uint256 timestamp = block.timestamp;
-        PoolInfo memory poolInfo = _poolInfos[pool];
-        if (timestamp > poolInfo.lastDistributeTime && poolInfo.lastDistributeTime > 0 && poolInfo.points > 0) {
-            reward = ((timestamp - poolInfo.lastDistributeTime) * poolInfo.config.weeklyReward) / 3600 / 24 / 7;
-        }
-    }
-
-    function _queryPendingPoolReward(address pool) private view returns (uint256 pendingRewardIndex, uint256 reward) {
+    function _queryPendingPoolReward(
+        address pool
+    ) private view returns (uint256 vaultCumulativeDeposits, uint256 pendingRewardIndex, uint256 reward) {
         if (_poolInfos[pool].points > 0) {
-            reward = _queryPendingDistributeReward(pool);
+            vaultCumulativeDeposits = IDepositVault(_depositVault).cumulativeDepositsOf(_rewardToken, address(this));
+            reward = vaultCumulativeDeposits - _cumulativeDistributes;
             if (reward > 0) {
                 pendingRewardIndex = (reward * INDEX_PRECISION) / _poolInfos[pool].points;
             }
@@ -154,11 +156,12 @@ contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTr
     }
 
     function _distribute(address pool) public {
-        (uint256 rewardIndex, uint256 reward) = _queryPendingPoolReward(pool);
-        if (rewardIndex > 0 && reward > 0) {
+        (uint256 vaultCumulativeDeposits, uint256 rewardIndex, uint256 reward) = _queryPendingPoolReward(pool);
+        if (vaultCumulativeDeposits > 0 && rewardIndex > 0 && reward > 0) {
             _poolInfos[pool].cumulativeRewards += reward;
             _poolInfos[pool].rewardIndex += rewardIndex;
             _poolInfos[pool].lastDistributeTime = block.timestamp;
+            _cumulativeDistributes = vaultCumulativeDeposits;
         }
     }
 
@@ -169,13 +172,13 @@ contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTr
             amount += _claim(_pools.at(i - 1), user);
         }
         require(amount > 0, "NOTHING_TO_CLAIM");
-        IRewardVault(_rewardVault).transferTo(_rewardToken, user, amount);
+        IDepositVault(_depositVault).withdraw(_rewardToken, user, amount);
     }
 
     function claim(address pool) external override nonReentrant {
         uint256 amount = _claim(pool, msg.sender);
         require(amount > 0, "NOTHING_TO_CLAIM");
-        IRewardVault(_rewardVault).transferTo(_rewardToken, msg.sender, amount);
+        IDepositVault(_depositVault).withdraw(_rewardToken, msg.sender, amount);
     }
 
     function _adjustRewardByStakingPoint(address trader, uint256 rewardAmount) private returns (uint256) {
@@ -214,7 +217,7 @@ contract TradingPool is OwnableUpgradeable, ISwapObserver, ITradingPool, TokenTr
     function _queryPendingReward(address pool, address trader) public view returns (uint256 pendingReward) {
         uint256 points = _userPoolInfos[pool][trader].points;
         if (points > 0) {
-            (uint256 pendingRewardIndex, ) = _queryPendingPoolReward(pool);
+            (, uint256 pendingRewardIndex, ) = _queryPendingPoolReward(pool);
             uint256 rewardIndex = _poolInfos[pool].rewardIndex + pendingRewardIndex;
             pendingReward = (points * (rewardIndex - _userPoolInfos[pool][trader].rewardIndex)) / INDEX_PRECISION;
         }

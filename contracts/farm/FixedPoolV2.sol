@@ -6,11 +6,16 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "../common/TokenTransferer.sol";
 import "../common/ERC721Transferer.sol";
-import "./IFixedPool.sol";
+import "./IFixedPoolV2.sol";
 import "../vault/IDepositVault.sol";
-import "../vault/IRewardVault.sol";
 
-contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTransferer, ERC721Transferer, IFixedPool {
+contract FixedPoolV2 is
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    TokenTransferer,
+    ERC721Transferer,
+    IFixedPoolV2
+{
     using EnumerableSet for EnumerableSet.UintSet;
     uint256 constant INDEX_PRECISION = 1e12;
 
@@ -23,7 +28,6 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
     uint256 private _lockUnitSpan;
 
     uint256 private _rewardIndex;
-    uint256 private _lastDistributeTime;
     uint256 private _totalDeposits;
     uint256 private _totalWeight;
     uint256 private _nextDepositId;
@@ -35,29 +39,19 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
     uint256 private _accelerateRate;
     mapping(address => uint256) private _userAccelerateNFTs;
     address private _depositVault;
-    address private _rewardVault;
+    uint256 private _cumulativeDistributes;
 
-    function initialize(
-        address depositToken,
-        address rewardToken,
-        address depositVault,
-        address rewardVault
-    ) public initializer {
+    function initialize(address depositToken, address rewardToken, address depositVault) public initializer {
         __Ownable_init();
         __ReentrancyGuard_init();
         _depositToken = depositToken;
         _rewardToken = rewardToken;
         _depositVault = depositVault;
-        _rewardVault = rewardVault;
         _nextDepositId = 1;
     }
 
     function updateDepositVault(address val) public onlyOwner {
         _depositVault = val;
-    }
-
-    function updateRewardVault(address val) public onlyOwner {
-        _rewardVault = val;
     }
 
     function updateAccelerateConfig(address accelerateNFT, uint256 accelerateRate) public onlyOwner {
@@ -124,15 +118,12 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
             address rewardToken,
             uint256 startTime,
             uint256 endTime,
-            uint256 weeklyReward,
             uint256 lockUnitSpan,
             uint256 rewardIndex,
-            uint256 lastDistributeTime,
             uint256 totalDeposits,
             uint256 totalWeight,
             uint256 nextDepositId,
-            address depositVault,
-            address rewardVault
+            address depositVault
         )
     {
         return (
@@ -140,15 +131,12 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
             _rewardToken,
             _startTime,
             _endTime,
-            _weeklyReward,
             _lockUnitSpan,
             _rewardIndex,
-            _lastDistributeTime,
             _totalDeposits,
             _totalWeight,
             _nextDepositId,
-            _depositVault,
-            _rewardVault
+            _depositVault
         );
     }
 
@@ -223,7 +211,7 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
         uint256 harvestAmount = _depositions[depositId].reward;
         if (harvestAmount > 0) {
             _depositions[depositId].reward = 0;
-            IRewardVault(_rewardVault).transferTo(_rewardToken, msg.sender, harvestAmount);
+            IDepositVault(_depositVault).withdraw(_rewardToken, msg.sender, harvestAmount);
         }
         emit HarvestEvent(msg.sender, harvestAmount, timestamp);
     }
@@ -241,16 +229,14 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
         emit TotalDepositsChanged(_depositToken, _totalDeposits, timestamp);
     }
 
-    function queryPendingDistributeReward() public view returns (uint256 reward) {
-        uint256 timestamp = block.timestamp;
-        if (timestamp > _lastDistributeTime && _lastDistributeTime > 0 && _totalWeight > 0) {
-            reward = ((timestamp - _lastDistributeTime) * _weeklyReward) / 3600 / 24 / 7;
-        }
-    }
-
-    function queryPendingRewardIndex() public view returns (uint256 pendingRewardIndex) {
-        if (_totalDeposits > 0) {
-            uint256 reward = queryPendingDistributeReward();
+    function queryPendingRewardIndex()
+        public
+        view
+        returns (uint256 vaultCumulativeDeposits, uint256 pendingRewardIndex)
+    {
+        if (_totalWeight > 0) {
+            vaultCumulativeDeposits = IDepositVault(_depositVault).cumulativeDepositsOf(_rewardToken, address(this));
+            uint256 reward = vaultCumulativeDeposits - _cumulativeDistributes;
             if (reward > 0) {
                 pendingRewardIndex = (reward * INDEX_PRECISION) / _totalWeight;
             }
@@ -258,8 +244,11 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
     }
 
     function distribute() public {
-        _rewardIndex += queryPendingRewardIndex();
-        _lastDistributeTime = block.timestamp;
+        (uint256 vaultCumulativeDeposits, uint256 pendingRewardIndex) = queryPendingRewardIndex();
+        if (vaultCumulativeDeposits > 0 && pendingRewardIndex > 0) {
+            _rewardIndex += pendingRewardIndex;
+            _cumulativeDistributes = vaultCumulativeDeposits;
+        }
     }
 
     function calculateWeight(uint256 amount, uint256 lockUnits) public pure returns (uint256) {
@@ -269,7 +258,8 @@ contract FixedPool is OwnableUpgradeable, ReentrancyGuardUpgradeable, TokenTrans
     function queryPendingReward(uint256 depositId) public view returns (uint256 pendingReward) {
         Deposition memory deposition = _depositions[depositId];
         if (deposition.weight > 0) {
-            uint256 rewardIndex = _rewardIndex + queryPendingRewardIndex();
+            (, uint256 pendingRewardIndex) = queryPendingRewardIndex();
+            uint256 rewardIndex = _rewardIndex + pendingRewardIndex;
             uint256 weight = deposition.weight + deposition.extraWeight;
             pendingReward = (weight * (rewardIndex - deposition.rewardIndex)) / INDEX_PRECISION;
         }

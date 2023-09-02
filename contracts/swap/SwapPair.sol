@@ -215,7 +215,6 @@ contract SwapPair is ISwapPair {
         {
             address _token0 = token0;
             address _token1 = token1;
-            require(to != _token0 && to != _token1, "Swap: INVALID_TO");
             if (data.length > 0) ISwapCallee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
             balance0 = IERC20(_token0).balanceOf(address(this));
             balance1 = IERC20(_token1).balanceOf(address(this));

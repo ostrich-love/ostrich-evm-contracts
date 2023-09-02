@@ -11,8 +11,11 @@ import "./IDepositVault.sol";
 
 contract DepositVault is OwnableUpgradeable, ReentrancyGuardUpgradeable, IDepositVault {
 
-    mapping(address => mapping(address => uint)) public balances;
+    mapping(address => mapping(address => uint)) public override balanceOf;
+
     mapping(address => uint) public reserves;
+
+    mapping(address => mapping(address => uint)) public override cumulativeDepositsOf;
 
     receive() external payable {
         _deposit(address(0), msg.sender, msg.value);
@@ -23,26 +26,34 @@ contract DepositVault is OwnableUpgradeable, ReentrancyGuardUpgradeable, IDeposi
         __ReentrancyGuard_init();
     }
 
-    function balanceOf(address token, address account) public view override returns (uint balance) {
-        return balances[token][account];
-    }
-
     function depositETH(address account) public payable override nonReentrant {
         _deposit(address(0), account, msg.value);
     }
 
     function deposit(address token, address account) public payable override nonReentrant {
-        if (token == address(0)) {
-            _deposit(address(0), account, msg.value);
-        } else {
-            uint256 amount = IERC20(token).balanceOf(address(this)) - reserves[token];
-            _deposit(token, account, amount);
+        uint256 amount = token == address(0) ? msg.value : (IERC20(token).balanceOf(address(this)) - reserves[token]);
+        _deposit(token, account, amount);
+    }
+
+    function batchDeposit(
+        address token,
+        address[] memory accounts,
+        uint256[] memory weights
+    ) public payable override nonReentrant {
+        require(accounts.length > 0 && accounts.length == weights.length, "DepositVault,Invalid parameters");
+        uint256 amount = token == address(0) ? msg.value : (IERC20(token).balanceOf(address(this)) - reserves[token]);
+        uint256 totalWeight;
+        for (uint256 i = 0; i < weights.length; i++) {
+            totalWeight += weights[i];
+        }
+        for (uint256 i = 0; i < accounts.length; i++) {
+            _deposit(token, accounts[i], (amount * weights[i]) / totalWeight);
         }
     }
 
     function withdraw(address token, address to, uint256 amount) public override nonReentrant {
         address account = msg.sender;
-        require(balances[token][account] >= amount, "OstrichVault,INSUFFICIENT_BALACNE");
+        require(balanceOf[token][account] >= amount, "OstrichVault,INSUFFICIENT_BALACNE");
         require(reserves[token] >= amount, "OstrichVault,INSUFFICIENT_RESERVE");
         _transferTokenTo(token, to, amount);
         _withdraw(token, account, amount);
@@ -53,12 +64,13 @@ contract DepositVault is OwnableUpgradeable, ReentrancyGuardUpgradeable, IDeposi
     }
 
     function _withdraw(address token, address account, uint256 amount) private {
-        balances[token][account] -= amount;
+        balanceOf[token][account] -= amount;
         reserves[token] -= amount;
     }
 
     function _deposit(address token, address account, uint256 amount) private {
-        balances[token][account] += amount;
+        balanceOf[token][account] += amount;
+        cumulativeDepositsOf[token][account] += amount;
         reserves[token] += amount;
     }
 

@@ -30,6 +30,8 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         _;
     }
 
+    fallback() external payable {}
+
     receive() external payable {}
 
     function updateSwapObserver(address val) public onlyOwner {
@@ -65,14 +67,16 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         }
     }
 
-    function parseTokenPath(address[] memory tokenPath) private view returns (address[] memory pairPath) {
+    function _zeroToWeth(address token) private view returns (address) {
+        return token == address(0) ? WETH : token;
+    }
+
+    function _parsePairPath(address[] memory tokenPath) private view returns (address[] memory pairPath) {
         require(tokenPath.length > 1, "SwapAggregator: INVALID_PATH");
         pairPath = new address[](tokenPath.length - 1);
         for (uint256 i; i < tokenPath.length; i++) {
-            address token0 = tokenPath[i] == address(0) ? WETH : tokenPath[i];
             if (i < tokenPath.length - 1) {
-                address token1 = tokenPath[i + 1] == address(0) ? WETH : tokenPath[i + 1];
-                address pair = _pairs[token0][token1];
+                address pair = _pairs[_zeroToWeth(tokenPath[i])][_zeroToWeth(tokenPath[i + 1])];
                 require(pair != address(0), "SwapAggregator: PAIR_NOT_REGISTERED");
                 pairPath[i] = pair;
             }
@@ -83,7 +87,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address[] calldata tokenPath,
         uint256 amountIn
     ) external view override returns (uint256 amountOut) {
-        address[] memory pairPath = parseTokenPath(tokenPath);
+        address[] memory pairPath = _parsePairPath(tokenPath);
         return _getAmountOut(tokenPath, pairPath, amountIn);
     }
 
@@ -91,7 +95,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address[] calldata tokenPath,
         uint256 amountOut
     ) external view override returns (uint256 amountIn) {
-        address[] memory pairPath = parseTokenPath(tokenPath);
+        address[] memory pairPath = _parsePairPath(tokenPath);
         return _getAmountIn(tokenPath, pairPath, amountOut);
     }
 
@@ -102,7 +106,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address to,
         uint256 deadline
     ) external payable override ensure(deadline) {
-        address[] memory pairPath = parseTokenPath(tokenPath);
+        address[] memory pairPath = _parsePairPath(tokenPath);
         uint256 amountOut = _getAmountOut(tokenPath, pairPath, amountIn);
         require(amountOut >= amountOutMin, "SwapAggregator: INSUFFICIENT_OUTPUT_AMOUNT");
         _transferTokenIn(tokenPath, pairPath, amountIn);
@@ -116,7 +120,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address to,
         uint256 deadline
     ) external payable override ensure(deadline) {
-        address[] memory pairPath = parseTokenPath(tokenPath);
+        address[] memory pairPath = _parsePairPath(tokenPath);
         _transferTokenIn(tokenPath, pairPath, amountIn);
         uint256 amountOut = _swapSupportingFeeOnTransferTokens(tokenPath, pairPath, to);
         require(amountOut >= amountOutMin, "SwapAggregator: INSUFFICIENT_OUTPUT_AMOUNT");
@@ -129,7 +133,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address to,
         uint256 deadline
     ) external payable override ensure(deadline) {
-        address[] memory pairPath = parseTokenPath(tokenPath);
+        address[] memory pairPath = _parsePairPath(tokenPath);
         uint256 amountIn = _getAmountIn(tokenPath, pairPath, amountOut);
         require(amountIn <= amountInMax, "SwapAggregator: EXCESSIVE_INPUT_AMOUNT");
         _transferTokenIn(tokenPath, pairPath, amountIn);
@@ -139,8 +143,8 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
     function _transferTokenIn(address[] memory tokenPath, address[] memory pairPath, uint256 amountIn) private {
         if (tokenPath[0] == address(0)) {
             require(amountIn <= msg.value, "SwapAggregator: INVALID_TOKEN_INPUT_AMOUNT");
-            IWETH(tokenPath[0]).deposit{ value: amountIn }();
-            IWETH(tokenPath[0]).transfer(pairPath[0], amountIn);
+            IWETH(WETH).deposit{ value: amountIn }();
+            IWETH(WETH).transfer(pairPath[0], amountIn);
         } else {
             IERC20(tokenPath[0]).transferFrom(msg.sender, pairPath[0], amountIn);
         }
@@ -150,7 +154,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         uint256 amountOut;
         bool isEthOut = tokenPath[tokenPath.length - 1] == address(0);
         for (uint256 i = 0; i < tokenPath.length - 1; i++) {
-            (address tokenIn, address tokenOut) = (tokenPath[i], tokenPath[i + 1]);
+            (address tokenIn, address tokenOut) = (_zeroToWeth(tokenPath[i]), _zeroToWeth(tokenPath[i + 1]));
             amountOut = _getAmountOut(pairPath[i], tokenIn, tokenOut, amountIn);
             address recipient = i == tokenPath.length - 2 ? (isEthOut ? address(this) : to) : pairPath[i + 1];
             (uint256 amount0Out, uint256 amount1Out) = tokenIn < tokenOut
@@ -163,7 +167,7 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
             amountIn = amountOut;
         }
         if (isEthOut) {
-            IWETH(tokenPath[tokenPath.length - 1]).withdraw(amountOut);
+            IWETH(WETH).withdraw(amountOut);
             TransferHelper.safeTransferETH(to, amountOut);
         }
 
@@ -177,8 +181,13 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
         address[] memory pairPath,
         address to
     ) private returns (uint256) {
+        bool isEthOut = tokenPath[tokenPath.length - 1] == address(0);
         for (uint256 i = 0; i < tokenPath.length - 1; i++) {
-            (address tokenIn, address tokenOut, address pair) = (tokenPath[i], tokenPath[i + 1], pairPath[i]);
+            (address tokenIn, address tokenOut, address pair) = (
+                _zeroToWeth(tokenPath[i]),
+                _zeroToWeth(tokenPath[i + 1]),
+                pairPath[i]
+            );
             (uint256 reserve0, uint256 reserve1, ) = ISwapPair(pair).getReserves();
             uint256 amountIn = IERC20(tokenIn).balanceOf(pair) - (tokenIn < tokenOut ? reserve0 : reserve1);
             uint256 amountOut = _getAmountOut(pair, tokenIn, tokenOut, amountIn);
@@ -187,13 +196,16 @@ contract SwapAggregator is OwnableUpgradeable, ISwapAggregator {
                 ? (uint256(0), amountOut)
                 : (amountOut, uint256(0));
             ISwapPair(pair).swap(amount0Out, amount1Out, recipient, new bytes(0));
+            if (swapObserver != address(0) && (i == 0 || i == pairPath.length - 1)) {
+                ISwapObserver(swapObserver).onSwap(pair, msg.sender, tokenIn, tokenOut, amountIn, amountOut);
+            }
         }
 
         {
-            address tokenOut = tokenPath[tokenPath.length - 1];
+            address tokenOut = _zeroToWeth(tokenPath[tokenPath.length - 1]);
             uint256 amountOut = IERC20(tokenOut).balanceOf(address(this));
-            if (tokenPath[tokenPath.length - 1] == address(0)) {
-                IWETH(tokenOut).withdraw(amountOut);
+            if (isEthOut) {
+                IWETH(WETH).withdraw(amountOut);
                 TransferHelper.safeTransferETH(to, amountOut);
             } else {
                 TransferHelper.safeTransfer(tokenOut, to, amountOut);
